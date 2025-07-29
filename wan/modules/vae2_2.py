@@ -809,13 +809,19 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 
-    def decode(self, z, scale):
+    def decode(self, z, scale, save_latents_only=False):
         self.clear_cache()
         if isinstance(scale[0], torch.Tensor):
             z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
                 1, self.z_dim, 1, 1, 1)
         else:
             z = z / scale[1] + scale[0]
+
+        if save_latents_only:
+            z = z.squeeze(0)
+            return z
+
+        # return latents
         iter_ = z.shape[2]
         x = self.conv2(z)
         for i in range(iter_):
@@ -1035,14 +1041,14 @@ class Wan2_2_VAE:
             logging.info(e)
             return None
 
-    def decode(self, zs):
+    def decode(self, zs, save_latents_only=False):
         try:
             if not isinstance(zs, list):
                 raise TypeError("zs should be a list")
             with amp.autocast(dtype=self.dtype):
                 return [
                     self.model.decode(u.unsqueeze(0),
-                                      self.scale).float().clamp_(-1,
+                                      self.scale, save_latents_only).float().clamp_(-1,
                                                                  1).squeeze(0)
                     for u in zs
                 ]

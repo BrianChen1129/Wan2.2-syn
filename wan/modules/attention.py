@@ -4,6 +4,7 @@ import torch
 try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
+    print("FA3 is available")
 except ModuleNotFoundError:
     FLASH_ATTN_3_AVAILABLE = False
 

@@ -171,7 +171,8 @@ class WanTI2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 save_latents_only=False):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -234,7 +235,8 @@ class WanTI2V:
             guide_scale=guide_scale,
             n_prompt=n_prompt,
             seed=seed,
-            offload_model=offload_model)
+            offload_model=offload_model,
+            save_latents_only=save_latents_only)
 
     def t2v(self,
             input_prompt,
@@ -246,7 +248,8 @@ class WanTI2V:
             guide_scale=5.0,
             n_prompt="",
             seed=-1,
-            offload_model=True):
+            offload_model=True,
+            save_latents_only=False):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -307,6 +310,8 @@ class WanTI2V:
             context_null = self.text_encoder([n_prompt], torch.device('cpu'))
             context = [t.to(self.device) for t in context]
             context_null = [t.to(self.device) for t in context_null]
+
+        prompt_embed = context[0]
 
         noise = [
             torch.randn(
@@ -398,7 +403,7 @@ class WanTI2V:
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             if self.rank == 0:
-                videos = self.vae.decode(x0)
+                videos = self.vae.decode(x0, save_latents_only=save_latents_only)
 
         del noise, latents
         del sample_scheduler
@@ -408,7 +413,7 @@ class WanTI2V:
         if dist.is_initialized():
             dist.barrier()
 
-        return videos[0] if self.rank == 0 else None
+        return videos[0] if self.rank == 0 else None, prompt_embed
 
     def i2v(self,
             input_prompt,
