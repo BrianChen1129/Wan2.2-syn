@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import numpy as np
 from tqdm import tqdm
+import torchvision
 
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
@@ -68,7 +69,7 @@ def _parse_args():
         description="Generate a image or video from a text prompt or image using Wan"
     )
     parser.add_argument(
-        "--save_dir",
+        "--output_dir",
         type=str,
         default="./syn_latents",
         help="The directory to save the generated latents.")
@@ -198,59 +199,92 @@ def _init_logging(rank):
 
 
 def save_latents_to_parquet_batch(prompts: list, vae_latent_list: list, prompt_embeds_list: list, 
-                                 prompt_attention_masks_list: list, output_dir: str, chunk_idx: int):
-    """Save a batch of prompts and their corresponding latents, text embeddings, and attention masks to Parquet file."""
+                                 first_frames_list: list, output_dir: str, chunk_idx: int):
+    """Save a batch of prompts and their corresponding latents, text embeddings, and first frames to Parquet file."""
     os.makedirs(output_dir, exist_ok=True)
     
     # Prepare batch data
     batch_data = []
     
-    for prompt, vae_latent, prompt_embed, prompt_attention_mask in zip(prompts, vae_latent_list, prompt_embeds_list, prompt_attention_masks_list):
+    for i, (prompt, vae_latent, prompt_embed, first_frame_np) in enumerate(zip(prompts, vae_latent_list, prompt_embeds_list, first_frames_list)):
         # Convert tensors to numpy arrays
         vae_latent_np = vae_latent.cpu().numpy()
         prompt_embed_np = prompt_embed.cpu().numpy()
-        prompt_attention_mask_np = prompt_attention_mask.cpu().numpy()
+        
+        # Get video dimensions
+        if len(vae_latent_np.shape) == 4:  # [C, T, H, W]
+            num_frames = vae_latent_np.shape[1]
+            height = vae_latent_np.shape[2] * 16  # VAE latent to pixel ratio
+            width = vae_latent_np.shape[3] * 16
+        else:  # [C, H, W]
+            num_frames = 1
+            height = vae_latent_np.shape[1] * 16
+            width = vae_latent_np.shape[2] * 16
         
         record = {
-            "caption": prompt,
+            "id": f"sample_{chunk_idx:04d}_{i:03d}",
             "vae_latent_bytes": vae_latent_np.tobytes(),
             "vae_latent_shape": list(vae_latent_np.shape),
             "vae_latent_dtype": str(vae_latent_np.dtype),
             "text_embedding_bytes": prompt_embed_np.tobytes(),
             "text_embedding_shape": list(prompt_embed_np.shape),
             "text_embedding_dtype": str(prompt_embed_np.dtype),
-            "text_attention_mask_bytes": prompt_attention_mask_np.tobytes(),
-            "text_attention_mask_shape": list(prompt_attention_mask_np.shape),
-            "text_attention_mask_dtype": str(prompt_attention_mask_np.dtype)
+            "file_name": f"sample_{chunk_idx:04d}_{i:03d}",
+            "caption": prompt,
+            "media_type": "video" if num_frames > 1 else "image",
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "duration_sec": num_frames / 24.0,  # Assuming 8 fps
+            "fps": 24.0,
+            "pil_image_bytes": first_frame_np.tobytes(),
+            "pil_image_shape": list(first_frame_np.shape),
+            "pil_image_dtype": str(first_frame_np.dtype)
         }
         batch_data.append(record)
     
     # Convert batch data to PyArrow arrays
     arrays = [
-        pa.array([record["caption"] for record in batch_data]),
+        pa.array([record["id"] for record in batch_data]),
         pa.array([record["vae_latent_bytes"] for record in batch_data], type=pa.binary()),
         pa.array([record["vae_latent_shape"] for record in batch_data], type=pa.list_(pa.int64())),
         pa.array([record["vae_latent_dtype"] for record in batch_data]),
         pa.array([record["text_embedding_bytes"] for record in batch_data], type=pa.binary()),
         pa.array([record["text_embedding_shape"] for record in batch_data], type=pa.list_(pa.int64())),
         pa.array([record["text_embedding_dtype"] for record in batch_data]),
-        pa.array([record["text_attention_mask_bytes"] for record in batch_data], type=pa.binary()),
-        pa.array([record["text_attention_mask_shape"] for record in batch_data], type=pa.list_(pa.int64())),
-        pa.array([record["text_attention_mask_dtype"] for record in batch_data])
+        pa.array([record["file_name"] for record in batch_data]),
+        pa.array([record["caption"] for record in batch_data]),
+        pa.array([record["media_type"] for record in batch_data]),
+        pa.array([record["width"] for record in batch_data]),
+        pa.array([record["height"] for record in batch_data]),
+        pa.array([record["num_frames"] for record in batch_data]),
+        pa.array([record["duration_sec"] for record in batch_data]),
+        pa.array([record["fps"] for record in batch_data]),
+        pa.array([record["pil_image_bytes"] for record in batch_data], type=pa.binary()),
+        pa.array([record["pil_image_shape"] for record in batch_data], type=pa.list_(pa.int64())),
+        pa.array([record["pil_image_dtype"] for record in batch_data])
     ]
     
-    # Define schema
+    # Define schema matching pyarrow_schema_t2v with additional pil_image fields
     schema = pa.schema([
-        ("caption", pa.string()),
-        ("vae_latent_bytes", pa.binary()),
-        ("vae_latent_shape", pa.list_(pa.int64())),
-        ("vae_latent_dtype", pa.string()),
-        ("text_embedding_bytes", pa.binary()),
-        ("text_embedding_shape", pa.list_(pa.int64())),
-        ("text_embedding_dtype", pa.string()),
-        ("text_attention_mask_bytes", pa.binary()),
-        ("text_attention_mask_shape", pa.list_(pa.int64())),
-        ("text_attention_mask_dtype", pa.string())
+        pa.field("id", pa.string()),
+        pa.field("vae_latent_bytes", pa.binary()),
+        pa.field("vae_latent_shape", pa.list_(pa.int64())),
+        pa.field("vae_latent_dtype", pa.string()),
+        pa.field("text_embedding_bytes", pa.binary()),
+        pa.field("text_embedding_shape", pa.list_(pa.int64())),
+        pa.field("text_embedding_dtype", pa.string()),
+        pa.field("file_name", pa.string()),
+        pa.field("caption", pa.string()),
+        pa.field("media_type", pa.string()),
+        pa.field("width", pa.int64()),
+        pa.field("height", pa.int64()),
+        pa.field("num_frames", pa.int64()),
+        pa.field("duration_sec", pa.float64()),
+        pa.field("fps", pa.float64()),
+        pa.field("pil_image_bytes", pa.binary()),
+        pa.field("pil_image_shape", pa.list_(pa.int64())),
+        pa.field("pil_image_dtype", pa.string())
     ])
     
     # Create table
@@ -269,7 +303,7 @@ def save_latents_to_parquet_batch(prompts: list, vae_latent_list: list, prompt_e
 
 
 
-def generate_single_prompt(args, prompt, img, rank, device, cfg, prompt_expander=None):
+def generate_single_prompt(args, prompt, img, rank, device, cfg, prompt_expander=None, wan_ti2v=None):
     """Generate video for a single prompt using ti2v."""
     # Apply prompt extension if enabled
     if args.use_prompt_extend and prompt_expander is not None:
@@ -287,22 +321,23 @@ def generate_single_prompt(args, prompt, img, rank, device, cfg, prompt_expander
             prompt = prompt_output.prompt
         logging.info(f"Extended prompt: {prompt}")
     
-    # Generate video using ti2v
-    logging.info("Creating WanTI2V pipeline.")
-    wan_ti2v = wan.WanTI2V(
-        config=cfg,
-        checkpoint_dir=args.ckpt_dir,
-        device_id=device,
-        rank=0,
-        t5_fsdp=False,
-        dit_fsdp=False,
-        use_sp=False,
-        t5_cpu=args.t5_cpu,
-        convert_model_dtype=args.convert_model_dtype,
-    )
+    # Use the provided model or create a new one if not provided
+    if wan_ti2v is None:
+        logging.info("Creating WanTI2V pipeline.")
+        wan_ti2v = wan.WanTI2V(
+            config=cfg,
+            checkpoint_dir=args.ckpt_dir,
+            device_id=device,
+            rank=0,
+            t5_fsdp=False,
+            dit_fsdp=False,
+            use_sp=False,
+            t5_cpu=args.t5_cpu,
+            convert_model_dtype=args.convert_model_dtype,
+        )
 
     logging.info(f"Generating video for prompt: {prompt}")
-    video, prompt_embed = wan_ti2v.generate(
+    first_frame, prompt_embed, vae_latent = wan_ti2v.generate(
         prompt,
         img=img,
         size=SIZE_CONFIGS[args.size],
@@ -316,7 +351,7 @@ def generate_single_prompt(args, prompt, img, rank, device, cfg, prompt_expander
         offload_model=args.offload_model,
         save_latents_only=args.save_latents_only)
     
-    return video, prompt_embed, prompt
+    return first_frame, prompt_embed, prompt, vae_latent
 
 
 def generate(args):
@@ -339,7 +374,7 @@ def generate(args):
         logging.info(f"Using single prompt: {args.prompt}")
 
     # Check cache for already processed prompts
-    cache_file = os.path.join(args.save_dir, "processed_prompts.txt")
+    cache_file = os.path.join(args.output_dir, "processed_prompts.txt")
     processed_prompts = set()
     
     if os.path.exists(cache_file):
@@ -389,6 +424,20 @@ def generate(args):
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
 
+    # Create model once outside the loop
+    logging.info("Creating WanTI2V pipeline.")
+    wan_ti2v = wan.WanTI2V(
+        config=cfg,
+        checkpoint_dir=args.ckpt_dir,
+        device_id=device,
+        rank=0,
+        t5_fsdp=False,
+        dit_fsdp=False,
+        use_sp=False,
+        t5_cpu=args.t5_cpu,
+        convert_model_dtype=args.convert_model_dtype,
+    )
+
     # Process prompts in batches
     logging.info(f"Processing {len(prompts)} prompts in batches of 8")
     
@@ -398,6 +447,8 @@ def generate(args):
     current_batch_vae_latent = []
     current_batch_prompt_embeds = []
     current_batch_prompt_attention_masks = []
+    current_batch_original_prompts = []  # Store original prompts for cache
+    current_batch_first_frames = [] # Store first frames for saving
     chunk_idx = 0
     
     # Create progress bar
@@ -407,21 +458,36 @@ def generate(args):
         try:
             logging.info(f"Processing prompt {i+1}/{len(prompts)}: {prompt}")
             
-            # Generate for current prompt
-            video, prompt_embed, processed_prompt = generate_single_prompt(
-                args, prompt, img, 0, device, cfg, prompt_expander)
+            # Generate for current prompt using the same model
+            first_frame, prompt_embed, processed_prompt, vae_latent = generate_single_prompt(
+                args, prompt, img, 0, device, cfg, prompt_expander, wan_ti2v)
+            # Save first frame as PIL image
+            # first_frame is [C, T, H, W] format, we want to take the first frame
+            first_frame_np = first_frame[:, 0, :, :]  # Take first frame: [C, H, W]
+            first_frame_np = torchvision.utils.make_grid(first_frame_np, nrow=6)
+            
+            # Convert to PIL Image and save
+            first_frame_np = first_frame_np.cpu().numpy()
+            # Convert from CHW to HWC format for PIL
+            first_frame_np = first_frame_np.transpose(1, 2, 0)
+            # Normalize from [-1, 1] to [0, 255]
+            first_frame_np = ((first_frame_np + 1) * 127.5).clip(0, 255).astype(np.uint8)
+            # pil_image = Image.fromarray(first_frame_np)
+            # pil_image.save(os.path.join(args.output_dir, f"first_frame_1{i:04d}.png"))
             
             # Prepare data for saving
-            vae_latent = video.to(torch.float32)
+            vae_latent = vae_latent.to(torch.float32)
             prompt_embed = prompt_embed.to(torch.float32)
             text_seq_len = prompt_embed.shape[0]
             prompt_attention_mask = torch.ones(text_seq_len).to(torch.long)
             
             # Add to current batch
-            current_batch_prompts.append(processed_prompt)
+            current_batch_prompts.append(processed_prompt)  # Extended prompt for parquet
+            current_batch_original_prompts.append(prompt)   # Original prompt for cache
             current_batch_vae_latent.append(vae_latent)
             current_batch_prompt_embeds.append(prompt_embed)
             current_batch_prompt_attention_masks.append(prompt_attention_mask)
+            current_batch_first_frames.append(first_frame_np) # Append first frame
             
             # Save batch if it's full or if it's the last prompt
             if len(current_batch_prompts) == batch_size or i == len(prompts) - 1:
@@ -429,29 +495,28 @@ def generate(args):
                     current_batch_prompts,
                     current_batch_vae_latent,
                     current_batch_prompt_embeds,
-                    current_batch_prompt_attention_masks,
-                    args.save_dir,
+                    current_batch_first_frames,
+                    args.output_dir,
                     chunk_idx
                 )
                 logging.info(f"Saved batch {chunk_idx} with {len(current_batch_prompts)} prompts to {parquet_file}")
                 
-                # Update cache with processed prompts (original prompts, not extended ones)
+                # Update cache with original prompts (not extended ones)
                 with open(cache_file, 'a', encoding='utf-8') as f:
-                    # Calculate the start index of this batch in the original prompts list
-                    batch_start_idx = i - len(current_batch_prompts) + 1
-                    for j in range(len(current_batch_prompts)):
-                        original_prompt = prompts[batch_start_idx + j]
+                    for original_prompt in current_batch_original_prompts:
                         f.write(f"{original_prompt}\n")
                 
                 # Clear batch storage
                 current_batch_prompts = []
+                current_batch_original_prompts = []
                 current_batch_vae_latent = []
                 current_batch_prompt_embeds = []
                 current_batch_prompt_attention_masks = []
+                current_batch_first_frames = []
                 chunk_idx += 1
             
             # Clean up memory
-            del video
+            del first_frame, vae_latent
             if 'prompt_embed' in locals():
                 del prompt_embed
             torch.cuda.empty_cache()

@@ -815,11 +815,13 @@ class WanVAE_(nn.Module):
             z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
                 1, self.z_dim, 1, 1, 1)
         else:
-            z = z / scale[1] + scale[0]
+            z = z / scale[1] + scale[0] # torch.Size([1, 48, 31, 44, 80])
 
+        vae_latent = None
         if save_latents_only:
-            z = z.squeeze(0)
-            return z
+            import copy
+            vae_latent = copy.deepcopy(z.squeeze(0))
+            z = z[:, :, :1, :, :]
 
         # return latents
         iter_ = z.shape[2]
@@ -842,7 +844,7 @@ class WanVAE_(nn.Module):
                 out = torch.cat([out, out_], 2)
         out = unpatchify(out, patch_size=2)
         self.clear_cache()
-        return out
+        return out, vae_latent
 
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
@@ -1046,12 +1048,9 @@ class Wan2_2_VAE:
             if not isinstance(zs, list):
                 raise TypeError("zs should be a list")
             with amp.autocast(dtype=self.dtype):
-                return [
-                    self.model.decode(u.unsqueeze(0),
-                                      self.scale, save_latents_only).float().clamp_(-1,
-                                                                 1).squeeze(0)
-                    for u in zs
-                ]
+                decoded, vae_latent = self.model.decode(zs[0].unsqueeze(0),self.scale, save_latents_only)
+                decoded = decoded.float().clamp_(-1, 1).squeeze(0)
+                return decoded, vae_latent
         except TypeError as e:
             logging.info(e)
             return None

@@ -403,7 +403,7 @@ class WanTI2V:
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             if self.rank == 0:
-                videos = self.vae.decode(x0, save_latents_only=save_latents_only)
+                videos, vae_latent = self.vae.decode(x0, save_latents_only=save_latents_only)
 
         del noise, latents
         del sample_scheduler
@@ -413,7 +413,7 @@ class WanTI2V:
         if dist.is_initialized():
             dist.barrier()
 
-        return videos[0] if self.rank == 0 else None, prompt_embed
+        return videos, prompt_embed, vae_latent
 
     def i2v(self,
             input_prompt,
